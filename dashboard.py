@@ -317,7 +317,9 @@ with tab_timeband:
                 st.plotly_chart(fig, use_container_width=True)
 
         st.divider()
-        st.subheader("時間帯 × アプリ 使用時間ヒートマップ")
+        heat_col, heat_toggle_col = st.columns([5, 1])
+        heat_col.subheader("時間帯 × アプリ 使用時間ヒートマップ")
+        hide_zero = heat_toggle_col.toggle("ゼロ行を非表示", value=True, key="hide_zero_heat")
 
         top_apps_heat = (
             df.groupby("app_name")["duration_seconds"].sum().nlargest(12).index.tolist()
@@ -332,6 +334,8 @@ with tab_timeband:
             heat_df.pivot(index="app_name", columns="hour", values="minutes")
             .reindex(columns=range(24)).fillna(0)
         )
+        if hide_zero:
+            heat_pivot = heat_pivot[heat_pivot.sum(axis=1) > 0]
         fig_heat = px.imshow(
             heat_pivot,
             labels={"x": "時間帯", "y": "アプリ", "color": "使用時間 (分)"},
