@@ -12,7 +12,11 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from database import init_db, get_categories, set_category
+
 DB_PATH = Path(__file__).parent / "activity.db"
+
+init_db()
 
 st.set_page_config(
     page_title="Activity Tracker",
@@ -49,29 +53,22 @@ def build_sessions(df: pd.DataFrame, gap_seconds: int = 20) -> pd.DataFrame:
     """連続する同アプリ+タイトルの記録をセッション (start/end) に集約する"""
     if df.empty:
         return pd.DataFrame()
-
     df = df.sort_values("timestamp").copy()
     sessions = []
     cur_app = cur_title = session_start = last_end = None
-
     for row in df.itertuples():
         row_end = row.timestamp + pd.Timedelta(seconds=row.duration_seconds)
         gap = (row.timestamp - last_end).total_seconds() if last_end is not None else 0
-
         same = (cur_app == row.app_name and cur_title == row.window_title and gap <= gap_seconds)
-
         if not same:
             if cur_app is not None:
                 sessions.append({"app_name": cur_app, "window_title": cur_title,
                                   "start": session_start, "end": last_end})
             cur_app, cur_title, session_start = row.app_name, row.window_title, row.timestamp
-
         last_end = row_end
-
     if cur_app is not None:
         sessions.append({"app_name": cur_app, "window_title": cur_title,
                           "start": session_start, "end": last_end})
-
     sdf = pd.DataFrame(sessions)
     sdf["duration_min"] = ((sdf["end"] - sdf["start"]).dt.total_seconds() / 60).round(1)
     sdf["date"] = sdf["start"].dt.date
@@ -91,14 +88,12 @@ if view_mode == "日":
     start_dt = datetime.combine(selected, datetime.min.time())
     end_dt = start_dt + timedelta(days=1)
     period_label = selected.strftime("%Y/%m/%d")
-
 elif view_mode == "週":
     week_start = today - timedelta(days=today.weekday())
     selected = st.sidebar.date_input("週の開始日 (月曜日)", week_start)
     start_dt = datetime.combine(selected, datetime.min.time())
     end_dt = start_dt + timedelta(days=7)
     period_label = f"{selected.strftime('%Y/%m/%d')} 〜 {(selected + timedelta(days=6)).strftime('%m/%d')}"
-
 else:
     col_y, col_m = st.sidebar.columns(2)
     year = col_y.number_input("年", value=today.year, min_value=2020, max_value=2035, step=1)
@@ -116,30 +111,27 @@ if st.button("🔄 データを更新"):
     st.rerun()
 
 df = load_data(start_dt, end_dt)
+has_data = not df.empty
 
-if df.empty:
-    st.warning("この期間のデータがありません。トラッカーが起動しているか確認してください。")
-    st.stop()
-
-sessions = build_sessions(df)
-
-# ─── サマリー指標 ─────────────────────────────────────────────
-
-total_minutes = df["duration_seconds"].sum() / 60
-active_days = df["date"].nunique()
-top_app = df.groupby("app_name")["duration_seconds"].sum().idxmax()
-
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("合計作業時間", f"{total_minutes / 60:.1f} 時間")
-m2.metric("合計 (分)", f"{total_minutes:.0f} 分")
-m3.metric("記録日数", f"{active_days} 日")
-m4.metric("最多使用アプリ", top_app)
-
-st.divider()
+if has_data:
+    sessions = build_sessions(df)
+    total_minutes = df["duration_seconds"].sum() / 60
+    active_days   = df["date"].nunique()
+    top_app       = df.groupby("app_name")["duration_seconds"].sum().idxmax()
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("合計作業時間", f"{total_minutes / 60:.1f} 時間")
+    m2.metric("合計 (分)",   f"{total_minutes:.0f} 分")
+    m3.metric("記録日数",    f"{active_days} 日")
+    m4.metric("最多使用アプリ", top_app)
+    st.divider()
+else:
+    st.info("この期間のデータがありません。「⚙️ 設定」タブは引き続き利用できます。")
 
 # ─── タブ ─────────────────────────────────────────────────────
 
-tab_summary, tab_timeline, tab_timeband = st.tabs(["📊 集計", "📅 タイムライン", "🕐 時間帯分析"])
+tab_summary, tab_timeline, tab_timeband, tab_productivity, tab_settings = st.tabs(
+    ["📊 集計", "📅 タイムライン", "🕐 時間帯分析", "🎯 生産性スコア", "⚙️ 設定"]
+)
 
 
 # ════════════════════════════════════════════════════════════════
@@ -147,69 +139,70 @@ tab_summary, tab_timeline, tab_timeband = st.tabs(["📊 集計", "📅 タイ�
 # ════════════════════════════════════════════════════════════════
 
 with tab_summary:
-    app_totals = (
-        df.groupby("app_name")["duration_seconds"]
-        .sum()
-        .reset_index()
-        .assign(minutes=lambda x: (x["duration_seconds"] / 60).round(1))
-        .sort_values("duration_seconds", ascending=False)
-    )
-
-    col_bar, col_pie = st.columns([3, 2])
-
-    with col_bar:
-        st.subheader("アプリ別使用時間 (上位 15)")
-        fig_bar = px.bar(
-            app_totals.head(15),
-            x="minutes", y="app_name", orientation="h",
-            labels={"minutes": "使用時間 (分)", "app_name": "アプリ"},
-            color="minutes", color_continuous_scale="Blues", text="minutes",
-        )
-        fig_bar.update_traces(texttemplate="%{text:.1f}分", textposition="outside")
-        fig_bar.update_layout(yaxis={"categoryorder": "total ascending"}, coloraxis_showscale=False)
-        st.plotly_chart(fig_bar, use_container_width=True)
-
-    with col_pie:
-        st.subheader("使用割合 (上位 10)")
-        fig_pie = px.pie(
-            app_totals.head(10), values="minutes", names="app_name", hole=0.4,
-            color_discrete_sequence=px.colors.sequential.Blues_r,
-        )
-        fig_pie.update_traces(textposition="inside", textinfo="percent+label")
-        st.plotly_chart(fig_pie, use_container_width=True)
-
-    if view_mode != "日":
-        st.subheader("日別アプリ使用時間推移")
-        top5 = app_totals.head(5)["app_name"].tolist()
-        daily = (
-            df[df["app_name"].isin(top5)]
-            .groupby(["date", "app_name"])["duration_seconds"]
+    if not has_data:
+        st.warning("この期間のデータがありません。")
+    else:
+        app_totals = (
+            df.groupby("app_name")["duration_seconds"]
             .sum().reset_index()
             .assign(minutes=lambda x: (x["duration_seconds"] / 60).round(1))
+            .sort_values("duration_seconds", ascending=False)
         )
-        fig_daily = px.bar(
-            daily, x="date", y="minutes", color="app_name", barmode="stack",
-            labels={"minutes": "使用時間 (分)", "date": "日付", "app_name": "アプリ"},
-            color_discrete_sequence=px.colors.qualitative.Set2,
-        )
-        st.plotly_chart(fig_daily, use_container_width=True)
 
-    st.subheader("🔍 ウィンドウタイトル詳細")
-    selected_app = st.selectbox(
-        "アプリを選択",
-        options=app_totals["app_name"].tolist(),
-        format_func=lambda x: f"{x}  ({app_totals.loc[app_totals['app_name']==x, 'minutes'].values[0]:.1f} 分)",
-        key="summary_app_select",
-    )
-    title_df = (
-        df[df["app_name"] == selected_app]
-        .groupby("window_title")["duration_seconds"].sum().reset_index()
-        .assign(minutes=lambda x: (x["duration_seconds"] / 60).round(1))
-        .sort_values("duration_seconds", ascending=False).head(30)
-        .rename(columns={"window_title": "ウィンドウタイトル", "minutes": "使用時間 (分)"})
-        [["ウィンドウタイトル", "使用時間 (分)"]]
-    )
-    st.dataframe(title_df, use_container_width=True, hide_index=True)
+        col_bar, col_pie = st.columns([3, 2])
+        with col_bar:
+            st.subheader("アプリ別使用時間 (上位 15)")
+            fig_bar = px.bar(
+                app_totals.head(15),
+                x="minutes", y="app_name", orientation="h",
+                labels={"minutes": "使用時間 (分)", "app_name": "アプリ"},
+                color="minutes", color_continuous_scale="Blues", text="minutes",
+            )
+            fig_bar.update_traces(texttemplate="%{text:.1f}分", textposition="outside")
+            fig_bar.update_layout(yaxis={"categoryorder": "total ascending"}, coloraxis_showscale=False)
+            st.plotly_chart(fig_bar, use_container_width=True)
+
+        with col_pie:
+            st.subheader("使用割合 (上位 10)")
+            fig_pie = px.pie(
+                app_totals.head(10), values="minutes", names="app_name", hole=0.4,
+                color_discrete_sequence=px.colors.sequential.Blues_r,
+            )
+            fig_pie.update_traces(textposition="inside", textinfo="percent+label")
+            st.plotly_chart(fig_pie, use_container_width=True)
+
+        if view_mode != "日":
+            st.subheader("日別アプリ使用時間推移")
+            top5 = app_totals.head(5)["app_name"].tolist()
+            daily = (
+                df[df["app_name"].isin(top5)]
+                .groupby(["date", "app_name"])["duration_seconds"]
+                .sum().reset_index()
+                .assign(minutes=lambda x: (x["duration_seconds"] / 60).round(1))
+            )
+            fig_daily = px.bar(
+                daily, x="date", y="minutes", color="app_name", barmode="stack",
+                labels={"minutes": "使用時間 (分)", "date": "日付", "app_name": "アプリ"},
+                color_discrete_sequence=px.colors.qualitative.Set2,
+            )
+            st.plotly_chart(fig_daily, use_container_width=True)
+
+        st.subheader("🔍 ウィンドウタイトル詳細")
+        selected_app = st.selectbox(
+            "アプリを選択",
+            options=app_totals["app_name"].tolist(),
+            format_func=lambda x: f"{x}  ({app_totals.loc[app_totals['app_name']==x, 'minutes'].values[0]:.1f} 分)",
+            key="summary_app_select",
+        )
+        title_df = (
+            df[df["app_name"] == selected_app]
+            .groupby("window_title")["duration_seconds"].sum().reset_index()
+            .assign(minutes=lambda x: (x["duration_seconds"] / 60).round(1))
+            .sort_values("duration_seconds", ascending=False).head(30)
+            .rename(columns={"window_title": "ウィンドウタイトル", "minutes": "使用時間 (分)"})
+            [["ウィンドウタイトル", "使用時間 (分)"]]
+        )
+        st.dataframe(title_df, use_container_width=True, hide_index=True)
 
 
 # ════════════════════════════════════════════════════════════════
@@ -219,68 +212,60 @@ with tab_summary:
 with tab_timeline:
     st.subheader("📅 作業タイムライン")
 
-    # 日付選択（週/月モードでは日付を絞る）
-    available_dates = sorted(sessions["date"].unique(), reverse=True)
-    if not available_dates:
-        st.warning("データがありません。")
-        st.stop()
-
-    timeline_date = st.selectbox(
-        "日付を選択",
-        options=available_dates,
-        format_func=lambda d: d.strftime("%Y/%m/%d (%a)"),
-        key="timeline_date",
-    )
-
-    day_sessions = sessions[sessions["date"] == timeline_date].copy()
-
-    if day_sessions.empty:
-        st.warning("この日のデータがありません。")
+    if not has_data:
+        st.warning("この期間のデータがありません。")
     else:
-        # 短すぎるセッション（10秒未満）は非表示オプション
-        min_min = st.slider("最短セッション表示 (分)", 0.0, 5.0, 0.5, 0.5, key="min_session")
-        day_sessions = day_sessions[day_sessions["duration_min"] >= min_min]
+        available_dates = sorted(sessions["date"].unique(), reverse=True)
 
-        # ラベル: アプリ名 + タイトルの先頭50文字
-        day_sessions["label"] = day_sessions.apply(
-            lambda r: f"{r['app_name']}  |  {str(r['window_title'])[:60]}", axis=1
+        timeline_date = st.selectbox(
+            "日付を選択",
+            options=available_dates,
+            format_func=lambda d: d.strftime("%Y/%m/%d (%a)"),
+            key="timeline_date",
         )
 
-        fig_gantt = px.timeline(
-            day_sessions,
-            x_start="start", x_end="end",
-            y="app_name",
-            color="app_name",
-            hover_data={"window_title": True, "duration_min": True,
-                        "start": "|%H:%M:%S", "end": "|%H:%M:%S", "app_name": False},
-            labels={"app_name": "アプリ", "duration_min": "時間(分)", "window_title": "タイトル"},
-            color_discrete_sequence=px.colors.qualitative.Set2,
-        )
-        fig_gantt.update_layout(
-            xaxis_title="時刻",
-            yaxis_title="",
-            height=max(300, 40 * day_sessions["app_name"].nunique() + 100),
-            showlegend=False,
-            xaxis=dict(
-                tickformat="%H:%M",
-                range=[
-                    datetime.combine(timeline_date, datetime.min.time()),
-                    datetime.combine(timeline_date, datetime.max.time()),
-                ],
-            ),
-        )
-        st.plotly_chart(fig_gantt, use_container_width=True)
+        day_sessions = sessions[sessions["date"] == timeline_date].copy()
 
-        # セッション一覧テーブル
-        with st.expander("セッション一覧"):
-            tbl = day_sessions[["start", "end", "app_name", "window_title", "duration_min"]].copy()
-            tbl["start"] = tbl["start"].dt.strftime("%H:%M:%S")
-            tbl["end"]   = tbl["end"].dt.strftime("%H:%M:%S")
-            tbl = tbl.rename(columns={
-                "start": "開始", "end": "終了",
-                "app_name": "アプリ", "window_title": "ウィンドウタイトル", "duration_min": "時間(分)"
-            })
-            st.dataframe(tbl, use_container_width=True, hide_index=True)
+        if day_sessions.empty:
+            st.warning("この日のデータがありません。")
+        else:
+            min_min = st.slider("最短セッション表示 (分)", 0.0, 5.0, 0.5, 0.5, key="min_session")
+            day_sessions = day_sessions[day_sessions["duration_min"] >= min_min]
+
+            fig_gantt = px.timeline(
+                day_sessions,
+                x_start="start", x_end="end",
+                y="app_name",
+                color="app_name",
+                hover_data={"window_title": True, "duration_min": True,
+                            "start": "|%H:%M:%S", "end": "|%H:%M:%S", "app_name": False},
+                labels={"app_name": "アプリ", "duration_min": "時間(分)", "window_title": "タイトル"},
+                color_discrete_sequence=px.colors.qualitative.Set2,
+            )
+            fig_gantt.update_layout(
+                xaxis_title="時刻",
+                yaxis_title="",
+                height=max(300, 40 * day_sessions["app_name"].nunique() + 100),
+                showlegend=False,
+                xaxis=dict(
+                    tickformat="%H:%M",
+                    range=[
+                        datetime.combine(timeline_date, datetime.min.time()),
+                        datetime.combine(timeline_date, datetime.max.time()),
+                    ],
+                ),
+            )
+            st.plotly_chart(fig_gantt, use_container_width=True)
+
+            with st.expander("セッション一覧"):
+                tbl = day_sessions[["start", "end", "app_name", "window_title", "duration_min"]].copy()
+                tbl["start"] = tbl["start"].dt.strftime("%H:%M:%S")
+                tbl["end"]   = tbl["end"].dt.strftime("%H:%M:%S")
+                tbl = tbl.rename(columns={
+                    "start": "開始", "end": "終了",
+                    "app_name": "アプリ", "window_title": "ウィンドウタイトル", "duration_min": "時間(分)"
+                })
+                st.dataframe(tbl, use_container_width=True, hide_index=True)
 
 
 # ════════════════════════════════════════════════════════════════
@@ -290,75 +275,236 @@ with tab_timeline:
 with tab_timeband:
     st.subheader("🕐 時間帯別の作業内容")
 
-    # AM / PM / 夜 サマリー
-    def band_label(hour: int) -> str:
-        if hour < 6:   return "深夜 (0-5時)"
-        if hour < 12:  return "午前 (6-11時)"
-        if hour < 18:  return "午後 (12-17時)"
-        return "夜 (18-23時)"
+    if not has_data:
+        st.warning("この期間のデータがありません。")
+    else:
+        def band_label(hour: int) -> str:
+            if hour < 6:   return "深夜 (0-5時)"
+            if hour < 12:  return "午前 (6-11時)"
+            if hour < 18:  return "午後 (12-17時)"
+            return "夜 (18-23時)"
 
-    df_band = df.copy()
-    df_band["time_band"] = df_band["hour"].apply(band_label)
+        df_band = df.copy()
+        df_band["time_band"] = df_band["hour"].apply(band_label)
+        band_app = (
+            df_band.groupby(["time_band", "app_name"])["duration_seconds"]
+            .sum().reset_index()
+            .assign(minutes=lambda x: (x["duration_seconds"] / 60).round(1))
+        )
+        band_order = ["午前 (6-11時)", "午後 (12-17時)", "夜 (18-23時)", "深夜 (0-5時)"]
+        present_bands = [b for b in band_order if b in band_app["time_band"].unique()]
 
-    band_app = (
-        df_band.groupby(["time_band", "app_name"])["duration_seconds"]
-        .sum().reset_index()
-        .assign(minutes=lambda x: (x["duration_seconds"] / 60).round(1))
-    )
+        cols = st.columns(len(present_bands))
+        for col, band in zip(cols, present_bands):
+            with col:
+                st.markdown(f"**{band}**")
+                bdf = (
+                    band_app[band_app["time_band"] == band]
+                    .sort_values("minutes", ascending=False).head(8)
+                )
+                fig = px.bar(
+                    bdf, x="minutes", y="app_name", orientation="h",
+                    color="minutes", color_continuous_scale="Blues",
+                    labels={"minutes": "分", "app_name": ""},
+                    text="minutes",
+                )
+                fig.update_traces(texttemplate="%{text:.0f}分", textposition="outside")
+                fig.update_layout(
+                    height=300, margin=dict(l=0, r=20, t=10, b=30),
+                    coloraxis_showscale=False,
+                    yaxis={"categoryorder": "total ascending"},
+                )
+                st.plotly_chart(fig, use_container_width=True)
 
-    band_order = ["午前 (6-11時)", "午後 (12-17時)", "夜 (18-23時)", "深夜 (0-5時)"]
-    present_bands = [b for b in band_order if b in band_app["time_band"].unique()]
+        st.divider()
+        heat_col, heat_toggle_col = st.columns([5, 1])
+        heat_col.subheader("時間帯 × アプリ 使用時間ヒートマップ")
+        hide_zero = heat_toggle_col.toggle("ゼロ行を非表示", value=True, key="hide_zero_heat")
 
-    cols = st.columns(len(present_bands))
-    for col, band in zip(cols, present_bands):
-        with col:
-            st.markdown(f"**{band}**")
-            bdf = (
-                band_app[band_app["time_band"] == band]
-                .sort_values("minutes", ascending=False)
-                .head(8)
+        top_apps_heat = (
+            df.groupby("app_name")["duration_seconds"].sum().nlargest(12).index.tolist()
+        )
+        heat_df = (
+            df[df["app_name"].isin(top_apps_heat)]
+            .groupby(["hour", "app_name"])["duration_seconds"]
+            .sum().reset_index()
+            .assign(minutes=lambda x: (x["duration_seconds"] / 60).round(1))
+        )
+        heat_pivot = (
+            heat_df.pivot(index="app_name", columns="hour", values="minutes")
+            .reindex(columns=range(24)).fillna(0)
+        )
+        if hide_zero:
+            # text_auto=".0f" で「0」表示になる行（合計 < 0.5 分）を除外
+            heat_pivot = heat_pivot[heat_pivot.sum(axis=1) >= 0.5]
+        fig_heat = px.imshow(
+            heat_pivot,
+            labels={"x": "時間帯", "y": "アプリ", "color": "使用時間 (分)"},
+            color_continuous_scale="Blues",
+            aspect="auto",
+            text_auto=".0f",
+            x=[f"{h}時" for h in range(24)],
+        )
+        fig_heat.update_layout(height=400)
+        st.plotly_chart(fig_heat, use_container_width=True)
+
+
+# ════════════════════════════════════════════════════════════════
+# TAB 4: 生産性スコア
+# ════════════════════════════════════════════════════════════════
+
+with tab_productivity:
+    st.subheader("🎯 生産性スコア")
+
+    categories = get_categories()
+
+    if not categories:
+        st.info("「⚙️ 設定」タブでアプリを「集中」または「気晴らし」に分類してください。")
+    elif not has_data:
+        st.warning("この期間のデータがありません。")
+    else:
+        def calc_score(focus_min: float, distraction_min: float) -> float | None:
+            total = focus_min + distraction_min
+            return None if total == 0 else round(focus_min / total * 100, 1)
+
+        def score_color(score: float | None) -> str:
+            if score is None:  return "#9E9E9E"
+            if score >= 70:    return "#43A047"
+            if score >= 40:    return "#FB8C00"
+            return "#E53935"
+
+        df_scored = df.copy()
+        df_scored["cat"] = df_scored["app_name"].map(lambda a: categories.get(a, "neutral"))
+        daily_cat = (
+            df_scored.groupby(["date", "cat"])["duration_seconds"]
+            .sum().reset_index()
+            .assign(minutes=lambda x: x["duration_seconds"] / 60)
+        )
+        daily_pivot = daily_cat.pivot(index="date", columns="cat", values="minutes").fillna(0)
+        for c in ("focus", "distraction", "neutral"):
+            if c not in daily_pivot.columns:
+                daily_pivot[c] = 0.0
+        daily_pivot["score"] = daily_pivot.apply(
+            lambda r: calc_score(r["focus"], r["distraction"]), axis=1
+        )
+        daily_pivot = daily_pivot.reset_index()
+
+        valid = daily_pivot.dropna(subset=["score"])
+        if valid.empty:
+            st.warning("集中/気晴らしアプリの使用記録がまだありません。")
+        else:
+            avg_score        = valid["score"].mean()
+            best_day         = valid.loc[valid["score"].idxmax(), "date"]
+            best_score       = valid["score"].max()
+            focus_total_h    = daily_pivot["focus"].sum() / 60
+            distract_total_h = daily_pivot["distraction"].sum() / 60
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("平均スコア",   f"{avg_score:.1f} / 100")
+            c2.metric("ベストデー",   f"{best_day}  ({best_score:.0f}点)")
+            c3.metric("合計集中時間", f"{focus_total_h:.1f} 時間")
+            c4.metric("合計気晴らし", f"{distract_total_h:.1f} 時間")
+            st.divider()
+
+            st.subheader("日別 生産性スコア")
+            bar_colors = [score_color(s) for s in daily_pivot["score"]]
+            fig_score = go.Figure(go.Bar(
+                x=daily_pivot["date"].astype(str),
+                y=daily_pivot["score"].fillna(0),
+                marker_color=bar_colors,
+                text=daily_pivot["score"].apply(lambda s: f"{s:.0f}" if pd.notna(s) else "—"),
+                textposition="outside",
+                hovertemplate="<b>%{x}</b><br>スコア: %{y:.1f}<extra></extra>",
+            ))
+            fig_score.add_hline(y=70, line_dash="dot", line_color="#43A047",
+                                annotation_text="目標 70", annotation_position="right")
+            fig_score.update_layout(
+                yaxis=dict(range=[0, 110], title="スコア"),
+                xaxis_title="日付",
+                height=350,
             )
-            fig = px.bar(
-                bdf, x="minutes", y="app_name", orientation="h",
-                color="minutes", color_continuous_scale="Blues",
-                labels={"minutes": "分", "app_name": ""},
-                text="minutes",
+            st.plotly_chart(fig_score, use_container_width=True)
+
+            st.subheader("集中時間 vs 気晴らし時間")
+            fig_stack = go.Figure()
+            fig_stack.add_bar(
+                x=daily_pivot["date"].astype(str), y=daily_pivot["focus"],
+                name="集中", marker_color="#1E88E5",
             )
-            fig.update_traces(texttemplate="%{text:.0f}分", textposition="outside")
-            fig.update_layout(
-                height=300, margin=dict(l=0, r=20, t=10, b=30),
-                coloraxis_showscale=False,
-                yaxis={"categoryorder": "total ascending"},
+            fig_stack.add_bar(
+                x=daily_pivot["date"].astype(str), y=daily_pivot["distraction"],
+                name="気晴らし", marker_color="#E53935",
             )
-            st.plotly_chart(fig, use_container_width=True)
+            fig_stack.update_layout(
+                barmode="stack", yaxis_title="使用時間 (分)", xaxis_title="日付",
+                height=300, legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            )
+            st.plotly_chart(fig_stack, use_container_width=True)
 
-    st.divider()
+            with st.expander("アプリ別 集中/気晴らし 内訳"):
+                breakdown = (
+                    df_scored[df_scored["cat"].isin(["focus", "distraction"])]
+                    .groupby(["app_name", "cat"])["duration_seconds"]
+                    .sum().reset_index()
+                    .assign(minutes=lambda x: (x["duration_seconds"] / 60).round(1))
+                    .sort_values(["cat", "minutes"], ascending=[True, False])
+                    .rename(columns={"app_name": "アプリ", "cat": "カテゴリ", "minutes": "使用時間 (分)"})
+                    [["カテゴリ", "アプリ", "使用時間 (分)"]]
+                )
+                breakdown["カテゴリ"] = breakdown["カテゴリ"].map(
+                    {"focus": "🟢 集中", "distraction": "🔴 気晴らし"}
+                )
+                st.dataframe(breakdown, use_container_width=True, hide_index=True)
 
-    # 時間帯 × アプリ ヒートマップ
-    st.subheader("時間帯 × アプリ 使用時間ヒートマップ")
 
-    top_apps_heat = (
-        df.groupby("app_name")["duration_seconds"].sum()
-        .nlargest(12).index.tolist()
-    )
-    heat_df = (
-        df[df["app_name"].isin(top_apps_heat)]
-        .groupby(["hour", "app_name"])["duration_seconds"]
-        .sum().reset_index()
-        .assign(minutes=lambda x: (x["duration_seconds"] / 60).round(1))
-    )
-    heat_pivot = (
-        heat_df.pivot(index="app_name", columns="hour", values="minutes")
-        .reindex(columns=range(24))
-        .fillna(0)
-    )
-    fig_heat = px.imshow(
-        heat_pivot,
-        labels={"x": "時間帯", "y": "アプリ", "color": "使用時間 (分)"},
-        color_continuous_scale="Blues",
-        aspect="auto",
-        text_auto=".0f",
-        x=[f"{h}時" for h in range(24)],
-    )
-    fig_heat.update_layout(height=400)
-    st.plotly_chart(fig_heat, use_container_width=True)
+# ════════════════════════════════════════════════════════════════
+# TAB 5: 設定
+# ════════════════════════════════════════════════════════════════
+
+with tab_settings:
+    st.subheader("⚙️ アプリカテゴリ設定")
+    st.caption("集中: 生産性スコアを上げるアプリ　／　気晴らし: スコアを下げるアプリ　／　未分類: スコアに影響しない")
+
+    all_apps_query_start = datetime.now() - timedelta(days=30)
+    with sqlite3.connect(DB_PATH) as conn:
+        all_apps_df = pd.read_sql_query(
+            "SELECT DISTINCT app_name FROM activity WHERE timestamp >= ? ORDER BY app_name",
+            conn,
+            params=(all_apps_query_start.isoformat(timespec="seconds"),),
+        )
+    all_apps = all_apps_df["app_name"].tolist()
+
+    if not all_apps:
+        st.info("まだアプリの記録がありません。トラッカーを起動して数分待ってから再度開いてください。")
+    else:
+        current_cats = get_categories()
+        CATEGORY_OPTIONS = {"未分類": "neutral", "🟢 集中": "focus", "🔴 気晴らし": "distraction"}
+        CATEGORY_LABELS  = {v: k for k, v in CATEGORY_OPTIONS.items()}
+
+        st.markdown(f"**直近 30 日間に使用したアプリ ({len(all_apps)} 件)**")
+
+        if "cat_edits" not in st.session_state:
+            st.session_state.cat_edits = {}
+
+        cols_per_row = 3
+        rows = [all_apps[i:i + cols_per_row] for i in range(0, len(all_apps), cols_per_row)]
+        for row_apps in rows:
+            cols = st.columns(cols_per_row)
+            for col, app in zip(cols, row_apps):
+                current       = current_cats.get(app, "neutral")
+                current_label = CATEGORY_LABELS.get(current, "未分類")
+                selected = col.selectbox(
+                    app,
+                    options=list(CATEGORY_OPTIONS.keys()),
+                    index=list(CATEGORY_OPTIONS.keys()).index(current_label),
+                    key=f"cat_{app}",
+                )
+                st.session_state.cat_edits[app] = CATEGORY_OPTIONS[selected]
+
+        st.divider()
+        if st.button("💾 保存する", type="primary"):
+            for app_name, cat in st.session_state.cat_edits.items():
+                set_category(app_name, cat)
+            st.cache_data.clear()
+            st.success("カテゴリを保存しました。")
+            st.rerun()
