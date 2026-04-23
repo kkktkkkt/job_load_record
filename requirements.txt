@@ -1,0 +1,7 @@
+pywin32
+psutil
+pystray
+Pillow
+streamlit
+pandas
+plotly
