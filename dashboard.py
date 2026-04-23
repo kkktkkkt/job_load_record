@@ -717,3 +717,48 @@ with tab_settings:
             st.cache_data.clear()
             st.success("カテゴリを保存しました。")
             st.rerun()
+
+    # ── Windows スタートアップ管理 ────────────────────────────────
+    st.divider()
+    st.subheader("🚀 Windows スタートアップ")
+
+    import winreg
+    import sys
+
+    STARTUP_REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    STARTUP_APP_NAME = "ActivityTracker"
+    _tracker_script = str(Path(__file__).parent / "tracker.py")
+    _pythonw = sys.executable.replace("python.exe", "pythonw.exe").replace("python", "pythonw")
+    _startup_cmd = f'"{_pythonw}" "{_tracker_script}"'
+
+    def _is_in_startup() -> bool:
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_REG_KEY, 0, winreg.KEY_READ) as k:
+                winreg.QueryValueEx(k, STARTUP_APP_NAME)
+            return True
+        except OSError:
+            return False
+
+    def _add_to_startup():
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_REG_KEY, 0, winreg.KEY_SET_VALUE) as k:
+            winreg.SetValueEx(k, STARTUP_APP_NAME, 0, winreg.REG_SZ, _startup_cmd)
+
+    def _remove_from_startup():
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_REG_KEY, 0, winreg.KEY_SET_VALUE) as k:
+            winreg.DeleteValue(k, STARTUP_APP_NAME)
+
+    in_startup = _is_in_startup()
+
+    if in_startup:
+        st.success("✅ スタートアップに登録済みです。PC 起動時にトラッカーが自動起動します。")
+        st.code(_startup_cmd, language=None)
+        if st.button("🗑️ スタートアップから削除", type="secondary"):
+            _remove_from_startup()
+            st.success("削除しました。次回 PC 起動時から自動起動しなくなります。")
+            st.rerun()
+    else:
+        st.info("スタートアップ未登録です。PC 起動時にトラッカーを自動起動したい場合は登録してください。")
+        if st.button("➕ スタートアップに追加", type="primary"):
+            _add_to_startup()
+            st.success("登録しました。次回 PC 起動時から自動でトラッカーが起動します。")
+            st.rerun()
