@@ -12,7 +12,11 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from database import init_db, get_categories, set_category
+
 DB_PATH = Path(__file__).parent / "activity.db"
+
+init_db()  # カテゴリテーブルを含む DB 初期化
 
 st.set_page_config(
     page_title="Activity Tracker",
@@ -139,7 +143,9 @@ st.divider()
 
 # ─── タブ ─────────────────────────────────────────────────────
 
-tab_summary, tab_timeline, tab_timeband = st.tabs(["📊 集計", "📅 タイムライン", "🕐 時間帯分析"])
+tab_summary, tab_timeline, tab_timeband, tab_productivity, tab_settings = st.tabs(
+    ["📊 集計", "📅 タイムライン", "🕐 時間帯分析", "🎯 生産性スコア", "⚙️ 設定"]
+)
 
 
 # ════════════════════════════════════════════════════════════════
@@ -362,3 +368,192 @@ with tab_timeband:
     )
     fig_heat.update_layout(height=400)
     st.plotly_chart(fig_heat, use_container_width=True)
+
+
+# ════════════════════════════════════════════════════════════════
+# TAB 4: 生産性スコア
+# ════════════════════════════════════════════════════════════════
+
+with tab_productivity:
+    st.subheader("🎯 生産性スコア")
+
+    categories = get_categories()
+
+    if not categories:
+        st.info("「⚙️ 設定」タブでアプリを「集中」または「気晴らし」に分類してください。")
+        st.stop()
+
+    focus_apps       = {a for a, c in categories.items() if c == "focus"}
+    distraction_apps = {a for a, c in categories.items() if c == "distraction"}
+
+    def calc_score(focus_min: float, distraction_min: float) -> float | None:
+        total = focus_min + distraction_min
+        if total == 0:
+            return None
+        return round(focus_min / total * 100, 1)
+
+    def score_color(score: float | None) -> str:
+        if score is None:
+            return "#9E9E9E"
+        if score >= 70:
+            return "#43A047"
+        if score >= 40:
+            return "#FB8C00"
+        return "#E53935"
+
+    # 日別スコア集計
+    df_scored = df.copy()
+    df_scored["cat"] = df_scored["app_name"].map(
+        lambda a: categories.get(a, "neutral")
+    )
+    daily_cat = (
+        df_scored.groupby(["date", "cat"])["duration_seconds"]
+        .sum().reset_index()
+        .assign(minutes=lambda x: x["duration_seconds"] / 60)
+    )
+    daily_pivot = daily_cat.pivot(index="date", columns="cat", values="minutes").fillna(0)
+    for col in ("focus", "distraction", "neutral"):
+        if col not in daily_pivot.columns:
+            daily_pivot[col] = 0.0
+    daily_pivot["score"] = daily_pivot.apply(
+        lambda r: calc_score(r["focus"], r["distraction"]), axis=1
+    )
+    daily_pivot = daily_pivot.reset_index()
+
+    # ── サマリー指標 ──
+    valid = daily_pivot.dropna(subset=["score"])
+    if valid.empty:
+        st.warning("集中/気晴らしアプリの使用記録がまだありません。")
+        st.stop()
+
+    avg_score  = valid["score"].mean()
+    best_day   = valid.loc[valid["score"].idxmax(), "date"]
+    best_score = valid["score"].max()
+    focus_total_h  = daily_pivot["focus"].sum() / 60
+    distract_total_h = daily_pivot["distraction"].sum() / 60
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("平均スコア",    f"{avg_score:.1f} / 100")
+    c2.metric("ベストデー",    f"{best_day}  ({best_score:.0f}点)")
+    c3.metric("合計集中時間",  f"{focus_total_h:.1f} 時間")
+    c4.metric("合計気晴らし",  f"{distract_total_h:.1f} 時間")
+
+    st.divider()
+
+    # ── 日別スコア棒グラフ ──
+    st.subheader("日別 生産性スコア")
+
+    bar_colors = [score_color(s) for s in daily_pivot["score"]]
+    fig_score = go.Figure(go.Bar(
+        x=daily_pivot["date"].astype(str),
+        y=daily_pivot["score"].fillna(0),
+        marker_color=bar_colors,
+        text=daily_pivot["score"].apply(lambda s: f"{s:.0f}" if pd.notna(s) else "—"),
+        textposition="outside",
+        hovertemplate="<b>%{x}</b><br>スコア: %{y:.1f}<extra></extra>",
+    ))
+    fig_score.add_hline(y=70, line_dash="dot", line_color="#43A047",
+                        annotation_text="目標 70", annotation_position="right")
+    fig_score.update_layout(
+        yaxis=dict(range=[0, 110], title="スコア"),
+        xaxis_title="日付",
+        height=350,
+    )
+    st.plotly_chart(fig_score, use_container_width=True)
+
+    # ── 集中 vs 気晴らし 積み上げ棒グラフ ──
+    st.subheader("集中時間 vs 気晴らし時間")
+
+    fig_stack = go.Figure()
+    fig_stack.add_bar(
+        x=daily_pivot["date"].astype(str),
+        y=daily_pivot["focus"],
+        name="集中",
+        marker_color="#1E88E5",
+    )
+    fig_stack.add_bar(
+        x=daily_pivot["date"].astype(str),
+        y=daily_pivot["distraction"],
+        name="気晴らし",
+        marker_color="#E53935",
+    )
+    fig_stack.update_layout(
+        barmode="stack",
+        yaxis_title="使用時間 (分)",
+        xaxis_title="日付",
+        height=300,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    )
+    st.plotly_chart(fig_stack, use_container_width=True)
+
+    # ── アプリ別カテゴリ内訳 ──
+    with st.expander("アプリ別 集中/気晴らし 内訳"):
+        breakdown = (
+            df_scored[df_scored["cat"].isin(["focus", "distraction"])]
+            .groupby(["app_name", "cat"])["duration_seconds"]
+            .sum().reset_index()
+            .assign(minutes=lambda x: (x["duration_seconds"] / 60).round(1))
+            .sort_values(["cat", "minutes"], ascending=[True, False])
+            .rename(columns={"app_name": "アプリ", "cat": "カテゴリ", "minutes": "使用時間 (分)"})
+            [["カテゴリ", "アプリ", "使用時間 (分)"]]
+        )
+        breakdown["カテゴリ"] = breakdown["カテゴリ"].map(
+            {"focus": "🟢 集中", "distraction": "🔴 気晴らし"}
+        )
+        st.dataframe(breakdown, use_container_width=True, hide_index=True)
+
+
+# ════════════════════════════════════════════════════════════════
+# TAB 5: 設定
+# ════════════════════════════════════════════════════════════════
+
+with tab_settings:
+    st.subheader("⚙️ アプリカテゴリ設定")
+    st.caption("集中: 生産性スコアを上げるアプリ　／　気晴らし: スコアを下げるアプリ　／　未分類: スコアに影響しない")
+
+    # 直近 30 日に使ったアプリを全取得
+    all_apps_query_start = datetime.now() - timedelta(days=30)
+    with sqlite3.connect(DB_PATH) as conn:
+        all_apps_df = pd.read_sql_query(
+            "SELECT DISTINCT app_name FROM activity WHERE timestamp >= ? ORDER BY app_name",
+            conn,
+            params=(all_apps_query_start.isoformat(timespec="seconds"),),
+        )
+    all_apps = all_apps_df["app_name"].tolist()
+
+    if not all_apps:
+        st.info("まだアプリの記録がありません。")
+    else:
+        current_cats = get_categories()
+        CATEGORY_OPTIONS = {"未分類": "neutral", "🟢 集中": "focus", "🔴 気晴らし": "distraction"}
+        CATEGORY_LABELS  = {v: k for k, v in CATEGORY_OPTIONS.items()}
+
+        st.markdown("**直近 30 日間に使用したアプリ**")
+
+        # 変更をまとめて保存するため session_state で管理
+        if "cat_edits" not in st.session_state:
+            st.session_state.cat_edits = {}
+
+        cols_per_row = 3
+        rows = [all_apps[i:i+cols_per_row] for i in range(0, len(all_apps), cols_per_row)]
+
+        for row_apps in rows:
+            cols = st.columns(cols_per_row)
+            for col, app in zip(cols, row_apps):
+                current = current_cats.get(app, "neutral")
+                current_label = CATEGORY_LABELS.get(current, "未分類")
+                selected = col.selectbox(
+                    app,
+                    options=list(CATEGORY_OPTIONS.keys()),
+                    index=list(CATEGORY_OPTIONS.keys()).index(current_label),
+                    key=f"cat_{app}",
+                )
+                st.session_state.cat_edits[app] = CATEGORY_OPTIONS[selected]
+
+        st.divider()
+        if st.button("💾 保存する", type="primary"):
+            for app_name, cat in st.session_state.cat_edits.items():
+                set_category(app_name, cat)
+            st.cache_data.clear()
+            st.success("カテゴリを保存しました。")
+            st.rerun()
