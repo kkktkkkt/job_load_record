@@ -335,7 +335,8 @@ with tab_timeband:
             .reindex(columns=range(24)).fillna(0)
         )
         if hide_zero:
-            heat_pivot = heat_pivot[heat_pivot.sum(axis=1) > 0]
+            # text_auto=".0f" で「0」表示になる行（合計 < 0.5 分）を除外
+            heat_pivot = heat_pivot[heat_pivot.sum(axis=1) >= 0.5]
         fig_heat = px.imshow(
             heat_pivot,
             labels={"x": "時間帯", "y": "アプリ", "color": "使用時間 (分)"},
